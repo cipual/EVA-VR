@@ -176,12 +176,16 @@ licenses. PICO SDK/OpenXR runtime components remain subject to their respective
 PICO and Khronos licenses. EVA-specific bridge and application code is provided
 for the EVA project.
 
-## Stable Input Reference (source v0.2.7)
+## Stable Input Reference
 
 OpenXR uses right-handed metre coordinates. EVA's robot mapping expects +X
 right, +Y up and -Z robot-forward. The controller must point in the robot's
 forward direction at the first normal grip engagement. The headset only needs
 to track the controllers; its viewing direction is not an alignment input.
+
+Only after both controls have returned to neutral and the input connection is
+ready can the first grip bind the heading. Preparation squeezes while input is
+blocked do not calibrate the frame.
 
 At that first grip, EVA-VR projects the controller's **aim** ray (-Z) onto the
 gravity-aligned horizontal plane and binds one shared heading for both hands.
@@ -230,7 +234,8 @@ bash tests/run_unit.sh /path/to/work_dirs/debug/vr-reference-test
 The regression covers effective-time boundaries, both hands, actual motion,
 noncommuting/repeated rotations, application offsets, reference-space filtering,
 unknown/malformed/lost-event cases, controller heading with pitch/roll,
-shared axes for both hands, and six room headings by six movement directions.
+neutral/connection gating before heading calibration, shared axes for both hands,
+and six room headings by six movement directions.
 It also writes `controller_direction_cases.jsonl` for host retargeting checks.
 Build with `./build.sh --offline` and
 validate PICO recentering with robot motion disabled.

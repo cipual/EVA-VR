@@ -82,6 +82,7 @@ public:
     virtual void setControllerPose(int leftright, const XrPosef& pose) = 0;
     virtual void setInputReference(const XrPosef& stableFromApp, XrReferenceSpaceType type,
                                    bool valid, bool changed) = 0;
+    virtual bool canBindInputHeading() const = 0;
     virtual void publishInputFrame(const std::array<bool, 2>& poseValid,
                                    const std::array<XrPosef, 2>& stablePoses, bool headingReady) = 0;
     virtual void setControllerPower(int leftright, int power) = 0;

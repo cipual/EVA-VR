@@ -99,8 +99,12 @@ private:
 // a new app's LOCAL yaw to define the robot's axes.
 class ControllerReferenceSpace {
 public:
-    bool bind(const XrSpaceLocation& aimInTracking, const InputReferenceSpace& trackingReference) {
+    bool bind(const XrSpaceLocation& aimInTracking, const InputReferenceSpace& trackingReference,
+              bool inputReady) {
         if (bound_) return true;
+        // Use the exporter's existing neutral/connection gate. A preparation
+        // squeeze while input is blocked must not permanently lock the heading.
+        if (!inputReady) return false;
         if (!trackingReference.valid() || !TrackedPose(aimInTracking)) return false;
         const auto stableAim = ComposePose(trackingReference.stableFromApp(), aimInTracking.pose);
         const auto forward = Quaternion(stableAim) * glm::vec3(0, 0, -1);

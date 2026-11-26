@@ -1577,7 +1577,8 @@ struct OpenXrProgram : IOpenXrProgram {
                                                       predictedDisplayTime, &aim);
                 CHECK_XRRESULT(aimResult, "xrLocateSpace(controller aim)");
                 if (XR_SUCCEEDED(aimResult) && aimState.isActive == XR_TRUE &&
-                    m_controllerReference.bind(aim, trackingReference)) {
+                    m_controllerReference.bind(aim, trackingReference,
+                                               m_application->canBindInputHeading())) {
                     const auto& q = m_controllerReference.inputFromTracking(trackingReference).orientation;
                     Log::Write(Log::Level::Info, Fmt("EVA-VR controller heading bound hand=%d time=%lld orientation=(%.6f,%.6f,%.6f,%.6f)",
                         hand, predictedDisplayTime, q.x, q.y, q.z, q.w));

@@ -31,6 +31,10 @@ public:
     virtual void setControllerPose(int leftright, const XrPosef& pose) override;
     void setInputReference(const XrPosef& stableFromApp, XrReferenceSpaceType type,
                            bool valid, bool changed) override;
+    bool canBindInputHeading() const override {
+        return !mExitRequested && mInputReferenceValid && !mInputWaitForNeutral &&
+            eva_bridge_is_connected();
+    }
     void publishInputFrame(const std::array<bool, 2>& poseValid,
                            const std::array<XrPosef, 2>& stablePoses, bool headingReady) override;
     virtual void setControllerPower(int leftright, int power) override;

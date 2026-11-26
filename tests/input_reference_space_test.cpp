@@ -112,10 +112,10 @@ int main(int argc, char** argv) {
         XrSpaceLocation aim{}; aim.type = XR_TYPE_SPACE_LOCATION;
         aim.locationFlags = 15;
         aim.pose = {{0, std::sin(yaw / 2), 0, std::cos(yaw / 2)}, {0, 1, 0}};
-        assert(frame.bind(aim, room));
+        assert(frame.bind(aim, room, true));
         assert(frame.bound());
         // A later hand/head rotation cannot redefine the established axes.
-        aim.pose = IdentityPose(); assert(frame.bind(aim, room));
+        aim.pose = IdentityPose(); assert(frame.bind(aim, room, true));
         for (int side = 0; side < 2; ++side) {
             const float startX = side ? .3f : -.3f;
             const XrPosef start{{0, std::sin(yaw / 2), 0, std::cos(yaw / 2)},
@@ -153,27 +153,45 @@ int main(int argc, char** argv) {
         position(newOutput, oldOutput.position.x, oldOutput.position.y, oldOutput.position.z);
         identityRotation(eva::ComposePose(eva::InversePose(oldOutput), newOutput));
     }
+    // Startup/reconnect can receive a preparation squeeze before neutral input
+    // reaches the host. It must not lock a heading that survives the later grip.
+    {
+        InputReferenceSpace room(XR_REFERENCE_SPACE_TYPE_STAGE);
+        eva::ControllerReferenceSpace frame;
+        XrSpaceLocation aim{}; aim.type = XR_TYPE_SPACE_LOCATION;
+        aim.locationFlags = 15; aim.pose = yaw90();
+        assert(!frame.bind(aim, room, false));
+        assert(!frame.bound());
+        aim.pose = IdentityPose();
+        assert(frame.bind(aim, room, true));
+        position(eva::ComposePose(frame.inputFromTracking(room),
+                                 {{0, 0, 0, 1}, {0, 0, -.1f}}), 0, 0, -.1f);
+        // Once bound, connection/neutral transitions do not redefine the axes.
+        aim.pose = yaw90();
+        assert(frame.bind(aim, room, false));
+        identityRotation(frame.inputFromTracking(room));
+    }
     // LOCAL unknown recentering does not invalidate the independent room frame.
     InputReferenceSpace picoLocal;
     picoLocal.queue(change(10, undefined, false)); picoLocal.advance(10); assert(!picoLocal.valid());
     InputReferenceSpace room(XR_REFERENCE_SPACE_TYPE_STAGE);
     eva::ControllerReferenceSpace independent;
     XrSpaceLocation aim{}; aim.type = XR_TYPE_SPACE_LOCATION; aim.pose = yaw90(); aim.locationFlags = 15;
-    assert(independent.bind(aim, room));
-    assert(!eva::ControllerReferenceSpace().bind(aim, picoLocal));
+    assert(independent.bind(aim, room, true));
+    assert(!eva::ControllerReferenceSpace().bind(aim, picoLocal, true));
     // Pitch/roll in a normal hold must not tilt the gravity-aligned axes.
     eva::ControllerReferenceSpace tilted;
     const XrPosef pitch{{std::sin(.2f), 0, 0, std::cos(.2f)}, {0, 0, 0}};
     const XrPosef roll{{0, 0, std::sin(.3f), std::cos(.3f)}, {0, 0, 0}};
     aim.pose = eva::ComposePose(yaw90(), eva::ComposePose(pitch, roll));
-    assert(tilted.bind(aim, room));
+    assert(tilted.bind(aim, room, true));
     position(eva::ComposePose(tilted.inputFromTracking(room), {{0, 0, 0, 1}, {-1, 2, 0}}), 0, 2, -1);
     // Missing tracking or a vertical pointing ray cannot establish a heading.
     eva::ControllerReferenceSpace unbound;
-    aim.locationFlags = 3; assert(!unbound.bind(aim, room));
-    aim.locationFlags = 15; aim.pose = x90; assert(!unbound.bind(aim, room)); assert(!unbound.bound());
-    aim.pose = yaw90(); assert(unbound.bind(aim, room));
-    room.invalidate(); assert(!eva::ControllerReferenceSpace().bind(aim, room));
+    aim.locationFlags = 3; assert(!unbound.bind(aim, room, true));
+    aim.locationFlags = 15; aim.pose = x90; assert(!unbound.bind(aim, room, true)); assert(!unbound.bound());
+    aim.pose = yaw90(); assert(unbound.bind(aim, room, true));
+    room.invalidate(); assert(!eva::ControllerReferenceSpace().bind(aim, room, true));
 
     std::cout << "PASS: timed transforms, both hands, all six directions, controller-defined heading, fixed shared reference, room resets and invalid tracking\n";
 }
