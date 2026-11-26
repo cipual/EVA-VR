@@ -832,7 +832,7 @@ struct OpenXrProgram : IOpenXrProgram {
                 m_inputStageSpace = XR_NULL_HANDLE;
             }
             Log::Write(Log::Level::Info, Fmt("EVA-VR input reference mode=%s",
-                m_inputStageSpace != XR_NULL_HANDLE ? "stage-bridge" : "reference-events"));
+                m_inputStageSpace != XR_NULL_HANDLE ? "controller-stage" : "controller-local"));
         }
 
         //XR_FB_passthrough
@@ -1451,28 +1451,32 @@ struct OpenXrProgram : IOpenXrProgram {
             XrSpaceLocation appFromStage{XR_TYPE_SPACE_LOCATION};
             const XrResult located = xrLocateSpace(m_inputStageSpace, m_appSpace,
                                                    frameState.predictedDisplayTime, &appFromStage);
-            const bool wasAnchored = m_stageBridge.anchored();
-            m_inputOriginValid = XR_SUCCEEDED(located) && m_stageBridge.update(appFromStage, m_stageReference);
-            m_stableInputFromApp = m_stageBridge.stableFromApp();
-            if (!wasAnchored && m_stageBridge.anchored()) {
-                const auto& p = appFromStage.pose;
-                Log::Write(Log::Level::Info, Fmt("EVA-VR STAGE anchor acquired position=(%.4f,%.4f,%.4f) orientation=(%.5f,%.5f,%.5f,%.5f)",
-                    p.position.x, p.position.y, p.position.z,
-                    p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w));
+            constexpr auto required = XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+            m_inputOriginValid = XR_SUCCEEDED(located) && m_stageReference.valid() &&
+                (appFromStage.locationFlags & required) == required && eva::ValidRigidPose(appFromStage.pose);
+            if (m_inputOriginValid) {
+                m_appFromStage = appFromStage.pose;
+                if (!m_roomLocated) {
+                    Log::Write(Log::Level::Info, "EVA-VR STAGE available; waiting for controller heading on first grip");
+                    m_roomLocated = true;
+                }
             }
+            m_stableInputFromApp = eva::ComposePose(m_controllerReference.inputFromTracking(m_stageReference),
+                                                   eva::InversePose(m_appFromStage));
         } else {
             m_inputOriginValid = m_inputReference.valid();
-            m_stableInputFromApp = m_inputReference.stableFromApp();
+            m_stableInputFromApp = m_controllerReference.inputFromTracking(m_inputReference);
         }
         if (referenceChanged) {
             const auto& p = m_stableInputFromApp;
             Log::Write(Log::Level::Info, Fmt("EVA-VR reference applied time=%lld valid=%d mode=%s position=(%.4f,%.4f,%.4f) orientation=(%.5f,%.5f,%.5f,%.5f)",
                 frameState.predictedDisplayTime, m_inputOriginValid,
-                m_inputStageSpace != XR_NULL_HANDLE ? "stage-bridge" : "reference-events",
+                m_inputStageSpace != XR_NULL_HANDLE ? "controller-stage" : "controller-local",
                 p.position.x, p.position.y, p.position.z,
                 p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w));
         }
-        m_application->setInputReference(m_stableInputFromApp, m_inputReference.type(),
+        m_application->setInputReference(m_stableInputFromApp,
+            m_inputStageSpace != XR_NULL_HANDLE ? XR_REFERENCE_SPACE_TYPE_STAGE : m_inputReference.type(),
                                          m_inputOriginValid, referenceChanged);
 
         XrFrameBeginInfo frameBeginInfo{XR_TYPE_FRAME_BEGIN_INFO};
@@ -1531,6 +1535,10 @@ struct OpenXrProgram : IOpenXrProgram {
 
         std::array<bool, Side::COUNT> handPoseValid{};
         std::array<XrPosef, Side::COUNT> inputPoses{eva::IdentityPose(), eva::IdentityPose()};
+        std::array<XrSpaceLocation, Side::COUNT> gripLocations{};
+        const bool useStage = m_inputStageSpace != XR_NULL_HANDLE;
+        const XrSpace trackingSpace = useStage ? m_inputStageSpace : m_appSpace;
+        const auto& trackingReference = useStage ? m_stageReference : m_inputReference;
         for (auto hand : {Side::LEFT, Side::RIGHT}) {
             // Rendering remains in the current app space.
             XrSpaceLocation renderPose{XR_TYPE_SPACE_LOCATION};
@@ -1548,33 +1556,55 @@ struct OpenXrProgram : IOpenXrProgram {
             poseInfo.subactionPath = m_input.handSubactionPath[hand];
             XrActionStatePose poseState{XR_TYPE_ACTION_STATE_POSE};
             CHECK_XRCMD(xrGetActionStatePose(m_session, &poseInfo, &poseState));
-
-            XrSpaceLocation inputPose = renderPose;
-            XrPosef stableFromInput = m_stableInputFromApp;
-            if (m_inputStageSpace != XR_NULL_HANDLE) {
-                // Do not combine a LOCAL grip pose with a separately sampled
-                // LOCAL/STAGE relation: PICO can return inconsistent poses.
-                inputPose = {XR_TYPE_SPACE_LOCATION};
-                res = xrLocateSpace(m_input.handSpace[hand], m_inputStageSpace,
-                                    predictedDisplayTime, &inputPose);
+            auto& grip = gripLocations[hand];
+            grip = renderPose;
+            if (useStage) {
+                // Do not combine PICO's inconsistent LOCAL grip/room queries.
+                grip = {XR_TYPE_SPACE_LOCATION};
+                res = xrLocateSpace(m_input.handSpace[hand], trackingSpace, predictedDisplayTime, &grip);
                 CHECK_XRRESULT(res, "xrLocateSpace(STAGE grip)");
-                stableFromInput = m_stageBridge.stableFromStage(m_stageReference);
             }
             handPoseValid[hand] = IsSessionFocused() && m_inputOriginValid &&
-                poseState.isActive == XR_TRUE && XR_SUCCEEDED(res) && eva::TrackedPose(inputPose);
-            if (handPoseValid[hand]) {
-                inputPoses[hand] = eva::ComposePose(stableFromInput, inputPose.pose);
+                poseState.isActive == XR_TRUE && XR_SUCCEEDED(res) && eva::TrackedPose(grip);
+
+            if (!m_controllerReference.bound() && handPoseValid[hand] &&
+                m_applicationEvent[hand].squeeze >= 0.5f) {
+                poseInfo.action = m_input.aimPoseAction;
+                XrActionStatePose aimState{XR_TYPE_ACTION_STATE_POSE};
+                CHECK_XRCMD(xrGetActionStatePose(m_session, &poseInfo, &aimState));
+                XrSpaceLocation aim{XR_TYPE_SPACE_LOCATION};
+                const auto aimResult = xrLocateSpace(m_input.aimSpace[hand], trackingSpace,
+                                                      predictedDisplayTime, &aim);
+                CHECK_XRRESULT(aimResult, "xrLocateSpace(controller aim)");
+                if (XR_SUCCEEDED(aimResult) && aimState.isActive == XR_TRUE &&
+                    m_controllerReference.bind(aim, trackingReference)) {
+                    const auto& q = m_controllerReference.inputFromTracking(trackingReference).orientation;
+                    Log::Write(Log::Level::Info, Fmt("EVA-VR controller heading bound hand=%d time=%lld orientation=(%.6f,%.6f,%.6f,%.6f)",
+                        hand, predictedDisplayTime, q.x, q.y, q.z, q.w));
+                }
             }
         }
+        // A single controller-defined frame is shared by BOTH hands. Transform
+        // both after binding so simultaneous grips cannot use different frames.
+        const auto inputFromTracking = m_controllerReference.inputFromTracking(trackingReference);
+        for (auto hand : {Side::LEFT, Side::RIGHT}) {
+            if (handPoseValid[hand]) {
+                inputPoses[hand] = eva::ComposePose(inputFromTracking, gripLocations[hand].pose);
+            }
+        }
+        m_stableInputFromApp = useStage
+            ? eva::ComposePose(inputFromTracking, eva::InversePose(m_appFromStage)) : inputFromTracking;
+        m_application->setInputReference(m_stableInputFromApp,
+            useStage ? XR_REFERENCE_SPACE_TYPE_STAGE : m_inputReference.type(), m_inputOriginValid, false);
 
         // Publish only after BOTH poses were sampled at this reference's XrTime.
         if (IsSessionFocused()) {
-            m_application->publishInputFrame(handPoseValid, inputPoses);
+            m_application->publishInputFrame(handPoseValid, inputPoses, m_controllerReference.bound());
         } else {
             // System dialogs must not synthesize button releases in collection
             // mode. Close the input session, then require neutral on refocus.
             m_application->setInputReference(m_stableInputFromApp,
-                m_inputReference.type(), m_inputOriginValid, true);
+                useStage ? XR_REFERENCE_SPACE_TYPE_STAGE : m_inputReference.type(), m_inputOriginValid, true);
         }
 
         //eye tracking
@@ -1705,7 +1735,9 @@ struct OpenXrProgram : IOpenXrProgram {
     eva::InputReferenceSpace m_inputReference;
     XrSpace m_inputStageSpace{XR_NULL_HANDLE};
     eva::InputReferenceSpace m_stageReference{XR_REFERENCE_SPACE_TYPE_STAGE};
-    eva::StageReferenceBridge m_stageBridge;
+    eva::ControllerReferenceSpace m_controllerReference;
+    XrPosef m_appFromStage = eva::IdentityPose();
+    bool m_roomLocated = false;
     XrPosef m_stableInputFromApp = eva::IdentityPose();
     bool m_inputOriginValid = false;
     XrSystemId m_systemId{XR_NULL_SYSTEM_ID};

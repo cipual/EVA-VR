@@ -2,6 +2,8 @@
 #include <cassert>
 #include <iostream>
 #include <limits>
+#include <fstream>
+#include <iomanip>
 
 using eva::IdentityPose;
 using eva::InputReferenceSpace;
@@ -23,7 +25,7 @@ static auto change(XrTime time, XrPosef pose, bool valid = true,
     return e;
 }
 
-int main() {
+int main(int argc, char** argv) {
     // Predicted display time controls the boundary, not event delivery time.
     InputReferenceSpace s;
     auto reset = yaw90(); reset.position = {2, 0, -1};
@@ -99,61 +101,79 @@ int main() {
     assert(eva::TrackedPose(hand));
     hand.pose.position.y = std::numeric_limits<float>::quiet_NaN(); assert(!eva::TrackedPose(hand));
 
-    // Actual PICO case: LOCAL events provide poseValid=false, but STAGE remains
-    // independently locatable. No controller gesture/calibration is involved.
-    eva::StageReferenceBridge bridge;
-    InputReferenceSpace room(XR_REFERENCE_SPACE_TYPE_STAGE);
-    XrSpaceLocation stageInApp{};
-    stageInApp.locationFlags = XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
-    stageInApp.pose = {{0, 0, 0, 1}, {.2f, -1.5f, .3f}};
-    assert(bridge.update(stageInApp, room));
-    position(bridge.stableFromApp(), 0, 0, 0); identityRotation(bridge.stableFromApp());
+    // Controller forward, rather than headset/LOCAL yaw, defines the robot
+    // reference. Both hands and all six translation directions must agree.
+    std::ofstream fixtures;
+    if (argc > 1) { fixtures.open(argv[1]); fixtures << std::setprecision(9); }
+    for (float yaw : {-3.14159265f, -1.57079633f, -.7f, 0.f, 1.57079633f, 2.4f}) {
+        InputReferenceSpace room(XR_REFERENCE_SPACE_TYPE_STAGE);
+        eva::ControllerReferenceSpace frame;
+        const float c = std::cos(yaw), sn = std::sin(yaw);
+        XrSpaceLocation aim{}; aim.type = XR_TYPE_SPACE_LOCATION;
+        aim.locationFlags = 15;
+        aim.pose = {{0, std::sin(yaw / 2), 0, std::cos(yaw / 2)}, {0, 1, 0}};
+        assert(frame.bind(aim, room));
+        assert(frame.bound());
+        // A later hand/head rotation cannot redefine the established axes.
+        aim.pose = IdentityPose(); assert(frame.bind(aim, room));
+        for (int side = 0; side < 2; ++side) {
+            const float startX = side ? .3f : -.3f;
+            const XrPosef start{{0, std::sin(yaw / 2), 0, std::cos(yaw / 2)},
+                                {c * startX - sn * .5f, 1, -sn * startX - c * .5f}};
+            const auto fromTracking = frame.inputFromTracking(room);
+            const auto initial = eva::ComposePose(fromTracking, start);
+            position(initial, startX, 1, -.5f); identityRotation(initial);
+            for (int axis = 0; axis < 3; ++axis) for (int sign : {-1, 1}) {
+                const float dx = axis == 0 ? sign * .01f : 0;
+                const float dy = axis == 1 ? sign * .01f : 0;
+                const float dz = axis == 2 ? sign * .01f : 0;
+                auto moved = start;
+                moved.position.x += c * dx + sn * dz;
+                moved.position.y += dy;
+                moved.position.z += -sn * dx + c * dz;
+                const auto exported = eva::ComposePose(fromTracking, moved);
+                position(exported, startX + dx, 1 + dy, -.5f + dz);
+                identityRotation(exported);
+                if (fixtures.is_open()) {
+                    fixtures << "{\"yaw\":" << yaw << ",\"hand\":" << side
+                             << ",\"axis\":" << axis << ",\"sign\":" << sign
+                             << ",\"origin\":[" << initial.position.x << ',' << initial.position.y << ',' << initial.position.z
+                             << "],\"position\":[" << exported.position.x << ',' << exported.position.y << ',' << exported.position.z << "]}\n";
+                }
+            }
+        }
+        // Known room resets preserve the original physical direction.
+        const auto before = frame.inputFromTracking(room);
+        auto shift = yaw90(); shift.position = {2, 0, -1};
+        room.queue(change(10, shift, true, XR_REFERENCE_SPACE_TYPE_STAGE)); room.advance(10);
+        const XrPosef oldGrip{{0, 0, 0, 1}, {.2f, 1, -.6f}};
+        const auto newGrip = eva::ComposePose(eva::InversePose(shift), oldGrip);
+        const auto oldOutput = eva::ComposePose(before, oldGrip);
+        const auto newOutput = eva::ComposePose(frame.inputFromTracking(room), newGrip);
+        position(newOutput, oldOutput.position.x, oldOutput.position.y, oldOutput.position.z);
+        identityRotation(eva::ComposePose(eva::InversePose(oldOutput), newOutput));
+    }
+    // LOCAL unknown recentering does not invalidate the independent room frame.
     InputReferenceSpace picoLocal;
     picoLocal.queue(change(10, undefined, false)); picoLocal.advance(10); assert(!picoLocal.valid());
-    // New LOCAL origin rotated90deg and translated(2,0,-1) in old LOCAL.
-    stageInApp.pose = {inverseYaw, {-1.3f, -1.5f, -1.8f}};
-    assert(bridge.update(stageInApp, room));
-    const auto compensatedLeft = eva::ComposePose(bridge.stableFromApp(), newLeft);
-    const auto compensatedRight = eva::ComposePose(bridge.stableFromApp(), newRight);
-    position(compensatedLeft, .3f, 1, -.5f); identityRotation(compensatedLeft);
-    position(compensatedRight, -.4f, .8f, -.9f); identityRotation(compensatedRight);
-    // PICO regression: STAGE grip is unchanged while the runtime's LOCAL grip
-    // and LOCAL/STAGE query disagree. Export must not use the LOCAL grip pose.
-    const XrPosef stageLeft{{0, 0, 0, 1}, {.1f, 2.5f, -.8f}};
-    const XrPosef stageRight{{0, 0, 0, 1}, {-.6f, 2.3f, -1.2f}};
-    position(eva::ComposePose(bridge.stableFromStage(room), stageLeft), .3f, 1, -.5f);
-    position(eva::ComposePose(bridge.stableFromStage(room), stageRight), -.4f, .8f, -.9f);
-    // Even a different/inconsistent LOCAL/STAGE relation cannot move these grips.
-    stageInApp.pose = {{0, 1, 0, 0}, {3, -1.2f, 4}};
-    assert(bridge.update(stageInApp, room));
-    position(eva::ComposePose(bridge.stableFromStage(room), stageLeft), .3f, 1, -.5f);
-    position(eva::ComposePose(bridge.stableFromStage(room), stageRight), -.4f, .8f, -.9f);
-    identityRotation(eva::ComposePose(bridge.stableFromStage(room), stageLeft));
-    auto stageMoved = stageLeft; stageMoved.position.z -= .1f;
-    position(eva::ComposePose(bridge.stableFromStage(room), stageMoved), .3f, 1, -.6f);
-    stageInApp.pose = {inverseYaw, {-1.3f, -1.5f, -1.8f}};
-    assert(bridge.update(stageInApp, room));
-    // A temporary failed query must not silently replace the original anchor.
-    stageInApp.locationFlags = 0; assert(!bridge.update(stageInApp, room));
-    stageInApp.locationFlags = XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
-    assert(bridge.update(stageInApp, room));
-    position(eva::ComposePose(bridge.stableFromApp(), newLeft), .3f, 1, -.5f);
+    InputReferenceSpace room(XR_REFERENCE_SPACE_TYPE_STAGE);
+    eva::ControllerReferenceSpace independent;
+    XrSpaceLocation aim{}; aim.type = XR_TYPE_SPACE_LOCATION; aim.pose = yaw90(); aim.locationFlags = 15;
+    assert(independent.bind(aim, room));
+    assert(!eva::ControllerReferenceSpace().bind(aim, picoLocal));
+    // Pitch/roll in a normal hold must not tilt the gravity-aligned axes.
+    eva::ControllerReferenceSpace tilted;
+    const XrPosef pitch{{std::sin(.2f), 0, 0, std::cos(.2f)}, {0, 0, 0}};
+    const XrPosef roll{{0, 0, std::sin(.3f), std::cos(.3f)}, {0, 0, 0}};
+    aim.pose = eva::ComposePose(yaw90(), eva::ComposePose(pitch, roll));
+    assert(tilted.bind(aim, room));
+    position(eva::ComposePose(tilted.inputFromTracking(room), {{0, 0, 0, 1}, {-1, 2, 0}}), 0, 2, -1);
+    // Missing tracking or a vertical pointing ray cannot establish a heading.
+    eva::ControllerReferenceSpace unbound;
+    aim.locationFlags = 3; assert(!unbound.bind(aim, room));
+    aim.locationFlags = 15; aim.pose = x90; assert(!unbound.bind(aim, room)); assert(!unbound.bound());
+    aim.pose = yaw90(); assert(unbound.bind(aim, room));
+    room.invalidate(); assert(!eva::ControllerReferenceSpace().bind(aim, room));
 
-    // A known change of the room origin itself is also compensated.
-    eva::StageReferenceBridge roomBridge;
-    InputReferenceSpace changingRoom(XR_REFERENCE_SPACE_TYPE_STAGE);
-    stageInApp.pose = {{0, 0, 0, 1}, {.2f, -1.5f, .3f}};
-    assert(roomBridge.update(stageInApp, changingRoom));
-    auto roomShift = IdentityPose(); roomShift.position = {4, 0, 0};
-    changingRoom.queue(change(1, roomShift, true, XR_REFERENCE_SPACE_TYPE_STAGE)); changingRoom.advance(1);
-    stageInApp.pose.position.x += 4;
-    assert(roomBridge.update(stageInApp, changingRoom));
-    position(roomBridge.stableFromApp(), 0, 0, 0); identityRotation(roomBridge.stableFromApp());
-    // Direct STAGE input also compensates a known room-origin change.
-    auto shiftedStageLeft = stageLeft; shiftedStageLeft.position.x -= 4;
-    position(eva::ComposePose(roomBridge.stableFromStage(changingRoom), shiftedStageLeft), .3f, 1, -.5f);
-    changingRoom.queue(change(2, undefined, false, XR_REFERENCE_SPACE_TYPE_STAGE)); changingRoom.advance(2);
-    assert(!roomBridge.update(stageInApp, changingRoom));
-
-    std::cout << "PASS: timed event transforms, both hands, offsets, invalid/lost events, tracked poses, PICO unknown-LOCAL/direct-STAGE grips, inconsistent LOCAL poses, missing query and room-origin changes\n";
+    std::cout << "PASS: timed transforms, both hands, all six directions, controller-defined heading, fixed shared reference, room resets and invalid tracking\n";
 }

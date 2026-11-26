@@ -94,36 +94,31 @@ private:
     std::vector<Change> pending_;
 };
 
-// LOCAL recenter events on PICO can have poseValid=false. An independently
-// located STAGE space still supplies the current LOCAL<->room transform.
-class StageReferenceBridge {
+// The operator points the controller in the robot's forward direction when
+// first engaging the grip. Bind that heading ONCE; never use headset yaw or
+// a new app's LOCAL yaw to define the robot's axes.
+class ControllerReferenceSpace {
 public:
-    bool update(const XrSpaceLocation& appFromStage, const InputReferenceSpace& stageReference) {
-        constexpr auto required = XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
-        if (!stageReference.valid() || (appFromStage.locationFlags & required) != required ||
-            !ValidRigidPose(appFromStage.pose)) return false;
-        if (!anchored_) {
-            initialAppFromStableStage_ = ComposePose(appFromStage.pose,
-                                                    InversePose(stageReference.stableFromApp()));
-            anchored_ = true;
-        }
-        stableFromApp_ = ComposePose(initialAppFromStableStage_,
-            ComposePose(stageReference.stableFromApp(), InversePose(appFromStage.pose)));
+    bool bind(const XrSpaceLocation& aimInTracking, const InputReferenceSpace& trackingReference) {
+        if (bound_) return true;
+        if (!trackingReference.valid() || !TrackedPose(aimInTracking)) return false;
+        const auto stableAim = ComposePose(trackingReference.stableFromApp(), aimInTracking.pose);
+        const auto forward = Quaternion(stableAim) * glm::vec3(0, 0, -1);
+        if (forward.x * forward.x + forward.z * forward.z < 1e-6f) return false;
+        const float yaw = std::atan2(-forward.x, -forward.z);
+        inputFromStableTracking_.orientation = {0, std::sin(-yaw / 2), 0, std::cos(-yaw / 2)};
+        bound_ = true;
         return true;
     }
 
-    bool anchored() const { return anchored_; }
-    const XrPosef& stableFromApp() const { return stableFromApp_; }
-    // Locate grip poses DIRECTLY in STAGE. PICO's separately queried LOCAL
-    // grip pose can disagree with appFromStage after a recenter.
-    XrPosef stableFromStage(const InputReferenceSpace& stageReference) const {
-        return ComposePose(initialAppFromStableStage_, stageReference.stableFromApp());
+    bool bound() const { return bound_; }
+    XrPosef inputFromTracking(const InputReferenceSpace& trackingReference) const {
+        return ComposePose(inputFromStableTracking_, trackingReference.stableFromApp());
     }
 
 private:
-    bool anchored_ = false;
-    XrPosef initialAppFromStableStage_ = IdentityPose();
-    XrPosef stableFromApp_ = IdentityPose();
+    bool bound_ = false;
+    XrPosef inputFromStableTracking_ = IdentityPose();
 };
 
 }  // namespace eva

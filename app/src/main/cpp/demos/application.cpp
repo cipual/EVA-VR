@@ -32,7 +32,7 @@ public:
     void setInputReference(const XrPosef& stableFromApp, XrReferenceSpaceType type,
                            bool valid, bool changed) override;
     void publishInputFrame(const std::array<bool, 2>& poseValid,
-                           const std::array<XrPosef, 2>& stablePoses) override;
+                           const std::array<XrPosef, 2>& stablePoses, bool headingReady) override;
     virtual void setControllerPower(int leftright, int power) override;
     virtual void setGazeLocation(XrSpaceLocation& gazeLocation, std::vector<XrView>& views, float ipd, XrResult result = XR_SUCCESS) override;
     virtual void setHandJointLocation(XrHandJointLocationEXT* location) override;
@@ -74,6 +74,7 @@ private:
     bool mInputReferenceValid = true;
     bool mInputReferenceInitialized = false;
     bool mInputWaitForNeutral = true;
+    bool mInputHeadingReady = false;
     std::array<bool, HAND_COUNT> mInputPoseTracked{};
     std::string mInputStatus;
     std::shared_ptr<CubeRender> mCubeRender;
@@ -254,9 +255,10 @@ void Application::setInputReference(const XrPosef& stableFromApp, XrReferenceSpa
 }
 
 void Application::publishInputFrame(const std::array<bool, 2>& poseValid,
-                                    const std::array<XrPosef, 2>& stablePoses) {
+                                    const std::array<XrPosef, 2>& stablePoses, bool headingReady) {
     mInputPoseTracked = poseValid;
     mInputControllerPose = stablePoses;
+    mInputHeadingReady = headingReady;
     if (mExitRequested || !mInputReferenceValid) return;
     if (mInputWaitForNeutral) {
         for (int hand = 0; hand < HAND_COUNT; ++hand) {
@@ -275,7 +277,10 @@ void Application::publishInputFrame(const std::array<bool, 2>& poseValid,
         const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
         static uint64_t sequence = 0;
-        auto controller = [](const XrPosef& pose, const ApplicationEvent& state, int hand, bool valid) {
+        auto controller = [headingReady](const XrPosef& pose, ApplicationEvent state, int hand, bool valid) {
+            // Before a tracked horizontal aim can bind the shared reference,
+            // keep grip disengaged. Face buttons remain usable for the UI.
+            if (!headingReady) { state.squeeze = 0; state.click_squeeze = false; }
             const bool primary = hand == HAND_LEFT ? state.click_x : state.click_a;
             const bool secondary = hand == HAND_LEFT ? state.click_y : state.click_b;
             char value[1800];
@@ -288,8 +293,7 @@ void Application::publishInputFrame(const std::array<bool, 2>& poseValid,
                 "{\"pressed\":%s,\"touched\":%s,\"value\":%s},"
                 "{\"pressed\":%s,\"touched\":%s,\"value\":%s}],\"axes\":[%.7g,%.7g]}",
                 valid ? "true" : "false",
-                // Already restored to the initial session space. EVA applies
-                // its existing robot-from-initial-XR extrinsic exactly once.
+                // Controller-aligned XR frame: +X right, +Y up, -Z robot forward.
                 pose.position.x, pose.position.y, pose.position.z,
                 pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w,
                 state.trigger >= 0.5f ? "true" : "false", state.touch_trigger ? "true" : "false", state.trigger,
@@ -304,7 +308,7 @@ void Application::publishInputFrame(const std::array<bool, 2>& poseValid,
             ? mInputControllerPose[HAND_LEFT] : eva::IdentityPose();
         const auto right = poseValid[HAND_RIGHT]
             ? mInputControllerPose[HAND_RIGHT] : eva::IdentityPose();
-        const std::string reference = mInputReferenceType == XR_REFERENCE_SPACE_TYPE_STAGE ? "bounded-floor" : "local";
+        const std::string reference = mInputReferenceType == XR_REFERENCE_SPACE_TYPE_STAGE ? "local-floor" : "local";
         std::string frame = "{\"type\":\"frame\",\"version\":1,\"seq\":" +
             std::to_string(sequence++) + ",\"client_time_ms\":" + std::to_string(now) +
             ",\"reference_space\":\"" + reference + "\",\"controllers\":{\"left\":" +
@@ -382,8 +386,10 @@ void Application::showPoseStatus() {
         ImGui::TextWrapped("Waiting for a valid runtime reference transform; robot input remains blocked.");
     } else if (mInputWaitForNeutral) {
         ImGui::TextColored(ImVec4(1, 0.8f, 0.2f, 1), "REFERENCE STABLE - RELEASE ALL CONTROLS");
+    } else if (!mInputHeadingReady) {
+        ImGui::Text("POINT CONTROLLER ROBOT-FORWARD; GRIP TO START");
     } else {
-        ImGui::Text("REFERENCE STABLE (initial session, automatic compensation)");
+        ImGui::Text("REFERENCE: CONTROLLER FORWARD (headset independent)");
     }
     ImGui::Text("TRACKING: left %s / right %s", mInputPoseTracked[HAND_LEFT] ? "OK" : "missing",
                 mInputPoseTracked[HAND_RIGHT] ? "OK" : "missing");
