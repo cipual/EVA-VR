@@ -72,6 +72,7 @@ private:
     bool mInputReferenceValid = true;
     bool mInputReferenceInitialized = false;
     bool mInputWaitForNeutral = true;
+    std::array<bool, HAND_COUNT> mInputPoseTracked{};
     std::string mInputStatus;
     std::shared_ptr<CubeRender> mCubeRender;
 
@@ -237,11 +238,13 @@ void Application::setInputReference(const XrPosef& stableFromApp, XrReferenceSpa
                                      bool valid, bool changed) {
     mInputStableFromApp = stableFromApp;
     mInputReferenceType = type;
+    const bool wasValid = mInputReferenceValid;
     mInputReferenceValid = valid;
     if (!valid) {
-        setInputStatus("EVA-VR reference transform unknown; input blocked");
-    } else if (changed || !mInputReferenceInitialized) {
+        setInputStatus("EVA-VR reference transform unavailable; input blocked");
+    } else if (changed || !mInputReferenceInitialized || !wasValid) {
         mInputWaitForNeutral = true;
+        mInputPoseTracked.fill(false);
         // A new socket/session discards old grip origins and queued semantic events.
         setInputStatus("EVA-VR reference changed; release all controls");
     }
@@ -249,6 +252,7 @@ void Application::setInputReference(const XrPosef& stableFromApp, XrReferenceSpa
 }
 
 void Application::publishInputFrame(const std::array<bool, 2>& poseValid) {
+    mInputPoseTracked = poseValid;
     if (mExitRequested || !mInputReferenceValid) return;
     if (mInputWaitForNeutral) {
         for (int hand = 0; hand < HAND_COUNT; ++hand) {
@@ -371,12 +375,14 @@ void Application::showPoseStatus() {
     ImGui::Text("  EVA-VR");
     if (!mInputReferenceValid) {
         ImGui::TextColored(ImVec4(1, 0.3f, 0.2f, 1), "REFERENCE UNKNOWN - INPUT BLOCKED");
-        ImGui::TextWrapped("Runtime supplied no old/new transform. Establish the robot frame before restarting input.");
+        ImGui::TextWrapped("Waiting for a valid runtime reference transform; robot input remains blocked.");
     } else if (mInputWaitForNeutral) {
         ImGui::TextColored(ImVec4(1, 0.8f, 0.2f, 1), "REFERENCE STABLE - RELEASE ALL CONTROLS");
     } else {
         ImGui::Text("REFERENCE STABLE (initial session, automatic compensation)");
     }
+    ImGui::Text("TRACKING: left %s / right %s", mInputPoseTracked[HAND_LEFT] ? "OK" : "missing",
+                mInputPoseTracked[HAND_RIGHT] ? "OK" : "missing");
 
     if (ImGui::BeginTable("pose status", 7, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit)) {
         ImGui::TableSetupColumn("source");

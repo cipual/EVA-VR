@@ -124,6 +124,9 @@ struct OpenXrProgram : IOpenXrProgram {
         if (m_appSpace != XR_NULL_HANDLE) {
             xrDestroySpace(m_appSpace);
         }
+        if (m_inputStageSpace != XR_NULL_HANDLE) {
+            xrDestroySpace(m_inputStageSpace);
+        }
 
         if (m_session != XR_NULL_HANDLE) {
             xrDestroySession(m_session);
@@ -819,6 +822,17 @@ struct OpenXrProgram : IOpenXrProgram {
             CHECK_XRCMD(xrCreateReferenceSpace(m_session, &referenceSpaceCreateInfo, &m_appSpace));
             m_inputReference = eva::InputReferenceSpace(referenceSpaceCreateInfo.referenceSpaceType,
                                                        referenceSpaceCreateInfo.poseInReferenceSpace);
+            XrReferenceSpaceCreateInfo stageInfo{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+            stageInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
+            stageInfo.poseInReferenceSpace = eva::IdentityPose();
+            const XrResult stageResult = xrCreateReferenceSpace(m_session, &stageInfo, &m_inputStageSpace);
+            if (stageResult != XR_ERROR_REFERENCE_SPACE_UNSUPPORTED) {
+                CHECK_XRRESULT(stageResult, "xrCreateReferenceSpace(input STAGE)");
+            } else {
+                m_inputStageSpace = XR_NULL_HANDLE;
+            }
+            Log::Write(Log::Level::Info, Fmt("EVA-VR input reference mode=%s",
+                m_inputStageSpace != XR_NULL_HANDLE ? "stage-bridge" : "reference-events"));
         }
 
         //XR_FB_passthrough
@@ -1012,6 +1026,7 @@ struct OpenXrProgram : IOpenXrProgram {
                     const auto& change = *reinterpret_cast<const XrEventDataReferenceSpaceChangePending*>(event);
                     if (change.session == m_session) {
                         m_inputReference.queue(change);
+                        m_stageReference.queue(change);
                         Log::Write(Log::Level::Info, Fmt("EVA-VR reference change type=%d time=%lld poseValid=%d",
                             change.referenceSpaceType, change.changeTime, change.poseValid));
                     }
@@ -1019,6 +1034,7 @@ struct OpenXrProgram : IOpenXrProgram {
                 }
                 case XR_TYPE_EVENT_DATA_EVENTS_LOST:
                     m_inputReference.invalidate();
+                    m_stageReference.invalidate();
                     Log::Write(Log::Level::Error, "EVA-VR events lost; input reference is unknown");
                     break;
                 default: {
@@ -1428,16 +1444,36 @@ struct OpenXrProgram : IOpenXrProgram {
         XrFrameWaitInfo frameWaitInfo{XR_TYPE_FRAME_WAIT_INFO};
         XrFrameState frameState{XR_TYPE_FRAME_STATE};
         CHECK_XRCMD(xrWaitFrame(m_session, &frameWaitInfo, &frameState));
-        const bool referenceChanged = m_inputReference.advance(frameState.predictedDisplayTime);
+        const bool appChanged = m_inputReference.advance(frameState.predictedDisplayTime);
+        const bool stageChanged = m_stageReference.advance(frameState.predictedDisplayTime);
+        const bool referenceChanged = appChanged || stageChanged;
+        if (m_inputStageSpace != XR_NULL_HANDLE) {
+            XrSpaceLocation appFromStage{XR_TYPE_SPACE_LOCATION};
+            const XrResult located = xrLocateSpace(m_inputStageSpace, m_appSpace,
+                                                   frameState.predictedDisplayTime, &appFromStage);
+            const bool wasAnchored = m_stageBridge.anchored();
+            m_inputOriginValid = XR_SUCCEEDED(located) && m_stageBridge.update(appFromStage, m_stageReference);
+            m_stableInputFromApp = m_stageBridge.stableFromApp();
+            if (!wasAnchored && m_stageBridge.anchored()) {
+                const auto& p = appFromStage.pose;
+                Log::Write(Log::Level::Info, Fmt("EVA-VR STAGE anchor acquired position=(%.4f,%.4f,%.4f) orientation=(%.5f,%.5f,%.5f,%.5f)",
+                    p.position.x, p.position.y, p.position.z,
+                    p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w));
+            }
+        } else {
+            m_inputOriginValid = m_inputReference.valid();
+            m_stableInputFromApp = m_inputReference.stableFromApp();
+        }
         if (referenceChanged) {
-            const auto& p = m_inputReference.stableFromApp();
-            Log::Write(Log::Level::Info, Fmt("EVA-VR reference applied time=%lld valid=%d position=(%.4f,%.4f,%.4f) orientation=(%.5f,%.5f,%.5f,%.5f)",
-                frameState.predictedDisplayTime, m_inputReference.valid(),
+            const auto& p = m_stableInputFromApp;
+            Log::Write(Log::Level::Info, Fmt("EVA-VR reference applied time=%lld valid=%d mode=%s position=(%.4f,%.4f,%.4f) orientation=(%.5f,%.5f,%.5f,%.5f)",
+                frameState.predictedDisplayTime, m_inputOriginValid,
+                m_inputStageSpace != XR_NULL_HANDLE ? "stage-bridge" : "reference-events",
                 p.position.x, p.position.y, p.position.z,
                 p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w));
         }
-        m_application->setInputReference(m_inputReference.stableFromApp(), m_inputReference.type(),
-                                         m_inputReference.valid(), referenceChanged);
+        m_application->setInputReference(m_stableInputFromApp, m_inputReference.type(),
+                                         m_inputOriginValid, referenceChanged);
 
         XrFrameBeginInfo frameBeginInfo{XR_TYPE_FRAME_BEGIN_INFO};
         CHECK_XRCMD(xrBeginFrame(m_session, &frameBeginInfo));
@@ -1518,8 +1554,8 @@ struct OpenXrProgram : IOpenXrProgram {
         } else {
             // System dialogs must not synthesize button releases in collection
             // mode. Close the input session, then require neutral on refocus.
-            m_application->setInputReference(m_inputReference.stableFromApp(),
-                m_inputReference.type(), m_inputReference.valid(), true);
+            m_application->setInputReference(m_stableInputFromApp,
+                m_inputReference.type(), m_inputOriginValid, true);
         }
 
         //eye tracking
@@ -1648,6 +1684,11 @@ struct OpenXrProgram : IOpenXrProgram {
     XrSession m_session{XR_NULL_HANDLE};
     XrSpace m_appSpace{XR_NULL_HANDLE};
     eva::InputReferenceSpace m_inputReference;
+    XrSpace m_inputStageSpace{XR_NULL_HANDLE};
+    eva::InputReferenceSpace m_stageReference{XR_REFERENCE_SPACE_TYPE_STAGE};
+    eva::StageReferenceBridge m_stageBridge;
+    XrPosef m_stableInputFromApp = eva::IdentityPose();
+    bool m_inputOriginValid = false;
     XrSystemId m_systemId{XR_NULL_SYSTEM_ID};
 
     std::vector<XrViewConfigurationView> m_configViews;

@@ -99,5 +99,42 @@ int main() {
     assert(eva::TrackedPose(hand));
     hand.pose.position.y = std::numeric_limits<float>::quiet_NaN(); assert(!eva::TrackedPose(hand));
 
-    std::cout << "PASS: time boundary, both hands, real motion, noncommuting composition, repeated reset, offsets, space filtering, unknown/lost events\n";
+    // Actual PICO case: LOCAL events provide poseValid=false, but STAGE remains
+    // independently locatable. No controller gesture/calibration is involved.
+    eva::StageReferenceBridge bridge;
+    InputReferenceSpace room(XR_REFERENCE_SPACE_TYPE_STAGE);
+    XrSpaceLocation stageInApp{};
+    stageInApp.locationFlags = XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+    stageInApp.pose = {{0, 0, 0, 1}, {.2f, -1.5f, .3f}};
+    assert(bridge.update(stageInApp, room));
+    position(bridge.stableFromApp(), 0, 0, 0); identityRotation(bridge.stableFromApp());
+    InputReferenceSpace picoLocal;
+    picoLocal.queue(change(10, undefined, false)); picoLocal.advance(10); assert(!picoLocal.valid());
+    // New LOCAL origin rotated90deg and translated(2,0,-1) in old LOCAL.
+    stageInApp.pose = {inverseYaw, {-1.3f, -1.5f, -1.8f}};
+    assert(bridge.update(stageInApp, room));
+    const auto compensatedLeft = eva::ComposePose(bridge.stableFromApp(), newLeft);
+    const auto compensatedRight = eva::ComposePose(bridge.stableFromApp(), newRight);
+    position(compensatedLeft, .3f, 1, -.5f); identityRotation(compensatedLeft);
+    position(compensatedRight, -.4f, .8f, -.9f); identityRotation(compensatedRight);
+    // A temporary failed query must not silently replace the original anchor.
+    stageInApp.locationFlags = 0; assert(!bridge.update(stageInApp, room));
+    stageInApp.locationFlags = XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+    assert(bridge.update(stageInApp, room));
+    position(eva::ComposePose(bridge.stableFromApp(), newLeft), .3f, 1, -.5f);
+
+    // A known change of the room origin itself is also compensated.
+    eva::StageReferenceBridge roomBridge;
+    InputReferenceSpace changingRoom(XR_REFERENCE_SPACE_TYPE_STAGE);
+    stageInApp.pose = {{0, 0, 0, 1}, {.2f, -1.5f, .3f}};
+    assert(roomBridge.update(stageInApp, changingRoom));
+    auto roomShift = IdentityPose(); roomShift.position = {4, 0, 0};
+    changingRoom.queue(change(1, roomShift, true, XR_REFERENCE_SPACE_TYPE_STAGE)); changingRoom.advance(1);
+    stageInApp.pose.position.x += 4;
+    assert(roomBridge.update(stageInApp, changingRoom));
+    position(roomBridge.stableFromApp(), 0, 0, 0); identityRotation(roomBridge.stableFromApp());
+    changingRoom.queue(change(2, undefined, false, XR_REFERENCE_SPACE_TYPE_STAGE)); changingRoom.advance(2);
+    assert(!roomBridge.update(stageInApp, changingRoom));
+
+    std::cout << "PASS: timed event transforms, both hands, offsets, invalid/lost events, tracked poses, PICO unknown-LOCAL/STAGE bridge, missing query and room-origin changes\n";
 }

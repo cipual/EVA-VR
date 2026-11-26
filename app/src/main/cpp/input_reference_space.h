@@ -94,4 +94,31 @@ private:
     std::vector<Change> pending_;
 };
 
+// LOCAL recenter events on PICO can have poseValid=false. An independently
+// located STAGE space still supplies the current LOCAL<->room transform.
+class StageReferenceBridge {
+public:
+    bool update(const XrSpaceLocation& appFromStage, const InputReferenceSpace& stageReference) {
+        constexpr auto required = XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+        if (!stageReference.valid() || (appFromStage.locationFlags & required) != required ||
+            !ValidRigidPose(appFromStage.pose)) return false;
+        if (!anchored_) {
+            initialAppFromStableStage_ = ComposePose(appFromStage.pose,
+                                                    InversePose(stageReference.stableFromApp()));
+            anchored_ = true;
+        }
+        stableFromApp_ = ComposePose(initialAppFromStableStage_,
+            ComposePose(stageReference.stableFromApp(), InversePose(appFromStage.pose)));
+        return true;
+    }
+
+    bool anchored() const { return anchored_; }
+    const XrPosef& stableFromApp() const { return stableFromApp_; }
+
+private:
+    bool anchored_ = false;
+    XrPosef initialAppFromStableStage_ = IdentityPose();
+    XrPosef stableFromApp_ = IdentityPose();
+};
+
 }  // namespace eva

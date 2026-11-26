@@ -176,18 +176,30 @@ licenses. PICO SDK/OpenXR runtime components remain subject to their respective
 PICO and Khronos licenses. EVA-specific bridge and application code is provided
 for the EVA project.
 
-## Stable Input Reference (source v0.2.6)
+## Stable Input Reference (source v0.2.7)
 
 OpenXR input uses right-handed metre coordinates: +X right, +Y up, -Z forward.
 The app exports poses in its **initial session reference**, rather than changing
 the robot's axis mapping whenever PICO recenters. A head turn does not change
 the robot coordinate transform.
 
-`XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING` provides the new natural
-origin expressed in the old natural space. At `changeTime`, the app composes
-that rigid transform into `stableFromApp`, accounting for the application's
-reference-space offset. The same compensation applies to both hands' positions
-and orientations. Rendering continues in the runtime's current app space.
+The app creates an independent OpenXR **STAGE** space and locates it relative
+to the current app space at each pose sample's exact `XrTime`. It stores the
+initial app-to-room relation once, then computes:
+
+```text
+initialAppFromCurrentApp = initialAppFromStableStage
+                        * stableStageFromCurrentStage
+                        * inverse(currentAppFromCurrentStage)
+```
+
+This handles the PICO4Ultra's observed LOCAL recenter events with
+`poseValid=false`: the transform comes from `xrLocateSpace`, not a guessed angle
+or a new user calibration. Known STAGE-origin changes are accumulated at their
+`changeTime`. If STAGE is unsupported, the app instead uses valid
+`XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING` poses, accounting for the
+application's reference-space offset. The same compensation applies to both
+hands' positions and orientations. Rendering keeps the runtime's current space.
 The existing host-side robot-from-initial-XR extrinsic is applied once and is
 not recalibrated for a known recenter. Frames identify the actual space type
 (`local` for LOCAL; `bounded-floor` for STAGE).
@@ -198,10 +210,12 @@ anchors and pending button events without starting robot motion. Frames are
 published only after both controller poses have been sampled for that frame;
 invalid tracking is no longer exported as a cached valid pose.
 
-If `poseValid` is false, a transform is malformed, or OpenXR events were lost,
-the app cannot determine the old/new relationship. It closes input with an
-explicit reason and displays **REFERENCE UNKNOWN - INPUT BLOCKED**. It never
-guesses a rotation. The stable reference lasts for the OpenXR session; a new
+If the STAGE origin itself changes without a valid transform, no independent
+room pose is available, or OpenXR events were lost, input is blocked with an
+explicit reason. A transient failed STAGE query recovers automatically without
+replacing the original anchor. An unknown LOCAL event alone does not invalidate
+the independent room bridge. The app never guesses a rotation. The stable
+reference lasts for the OpenXR session; a new
 app/session needs the host's corresponding robot-frame extrinsic or a physical
 anchor. This change does not claim to recover an unobserved absolute room frame.
 
@@ -213,5 +227,6 @@ bash tests/run_unit.sh /path/to/work_dirs/debug/vr-reference-test
 
 The regression covers effective-time boundaries, both hands, actual motion,
 noncommuting/repeated rotations, application offsets, reference-space filtering,
-and unknown/malformed/lost-event cases. Build with `./build.sh --offline` and
+unknown/malformed/lost-event cases, and PICO's unknown-LOCAL/valid-STAGE path.
+Build with `./build.sh --offline` and
 validate PICO recentering with robot motion disabled.
