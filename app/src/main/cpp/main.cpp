@@ -163,6 +163,29 @@ void android_main(struct android_app* app) {
 
         program->CreateInstance();
         program->InitializeSystem();
+
+        // NativeActivity's lifecycle callbacks wait until this thread consumes
+        // their commands. PICO's passthrough initialization calls back through
+        // the Android main thread, so starting it before the activity's window
+        // is ready can deadlock both threads during a VR activity restart.
+        Log::Write(Log::Level::Info, "Waiting for resumed Android window...");
+        while (app->destroyRequested == 0 && (!appState.Resumed || appState.NativeWindow == nullptr)) {
+            int events;
+            struct android_poll_source* source = nullptr;
+            const int result = ALooper_pollAll(-1, nullptr, &events, (void**)&source);
+            if (result == ALOOPER_POLL_ERROR) {
+                throw std::runtime_error("Failed to wait for Android startup events");
+            }
+            if (source != nullptr) {
+                source->process(app, source);
+            }
+        }
+        if (app->destroyRequested != 0) {
+            app->activity->vm->DetachCurrentThread();
+            return;
+        }
+
+        Log::Write(Log::Level::Info, "Android window ready; initializing OpenXR session");
         program->InitializeSession();
         program->CreateSwapchains();
         program->InitializeApplication();

@@ -58,7 +58,7 @@ public class MainActivity extends NativeActivity {
         if (next.equals(endpoint)) return;
         endpoint = next;
         // The endpoint changed underneath a live socket; re-dial on the new one.
-        disconnect();
+        disconnect("EVA-VR endpoint changed");
         if (resumed) connect();
     }
     @Override protected void onResume() {
@@ -66,17 +66,20 @@ public class MainActivity extends NativeActivity {
         connect();
     }
     @Override protected void onPause() {
-        resumed = false; disconnect(); super.onPause();
+        resumed = false; disconnect("EVA-VR activity paused"); super.onPause();
     }
     @Override protected void onDestroy() {
-        disconnect(); client.dispatcher().executorService().shutdown();
+        disconnect("EVA-VR activity destroyed"); client.dispatcher().executorService().shutdown();
         client.connectionPool().evictAll(); super.onDestroy();
     }
-    private synchronized void disconnect() {
+    private synchronized void disconnect(String reason) {
         handler.removeCallbacks(reconnect);
         WebSocket old = socket; socket = null; connected = false;
         haptics.clear();
-        if (old != null) old.cancel();
+        if (old != null) {
+            Log.i(TAG, reason);
+            old.close(1001, reason);
+        }
     }
     private synchronized void connect() {
         if (!resumed || socket != null || endpoint == null) return;
@@ -85,7 +88,9 @@ public class MainActivity extends NativeActivity {
             socket = client.newWebSocket(request, new WebSocketListener() {
                 @Override public void onOpen(WebSocket ws, Response response) {
                     synchronized (MainActivity.this) {
-                        if (socket != ws || !resumed) { ws.cancel(); return; }
+                        if (socket != ws || !resumed) {
+                            ws.close(1001, "EVA-VR activity paused"); return;
+                        }
                         connected = true;
                     }
                     Log.i(TAG, "WebSocket connected");

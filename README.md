@@ -43,13 +43,13 @@ The easiest path is to download the latest APK release artifact (signed with the
 project's development key):
 
 - [Latest release](https://github.com/Noietch/EVA-VR/releases/latest)
-- [Latest APK download](https://github.com/Noietch/EVA-VR/releases/latest/download/EVA-VR-v0.2.4.apk)
+- [Latest APK download](https://github.com/Noietch/EVA-VR/releases/latest/download/EVA-VR-v0.2.5.apk)
 
 After enabling USB debugging on the PICO 4 Ultra:
 
 ```bash
 adb devices
-adb install -r EVA-VR-v0.2.4.apk
+adb install -r EVA-VR-v0.2.5.apk
 ```
 
 The installed app is named **EVA-VR** and its package is
@@ -78,9 +78,16 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 ## Connect To EVA
 
-The APK uses ADB-only transport. It always connects to
-`ws://127.0.0.1:43876/ws?token=eva` inside the PICO. No IP input or Wi-Fi/LAN
-endpoint is used by this release.
+In EVA-CLIENT, select **DEVICE → Operation → VR → Start**. The workstation
+establishes ADB reverse forwarding and launches EVA-VR with the input node's
+current WebSocket endpoint and token. **Reconnect VR** relaunches the app.
+With a configured Wi-Fi ADB target the button is **Reconnect Wi-Fi**; USB can
+then be unplugged. The headset and workstation must share a reachable LAN.
+
+The APK connects to a loopback WebSocket inside the PICO over USB or wireless
+ADB. The workstation passes the endpoint using the `server_url` intent extra;
+no endpoint entry in the headset is required. Without that extra, the app uses
+`ws://127.0.0.1:43876/ws?token=eva`, which only works if the node uses that token.
 
 Example with the existing EVA node on port `43876`:
 
@@ -92,6 +99,20 @@ adb shell am start -n org.eva.pico.input/.MainActivity
 
 The in-view panel changes from `HOST: DISCONNECTED` to
 `HOST: CONNECTED` after the WebSocket handshake succeeds.
+
+Wear and wake the headset and both controllers during startup and collection.
+The dashboard shows live head/left/right poses. Removing the headset can pause
+the app and stop input even while ADB remains connected.
+PICO safety-boundary dialogs can also pause EVA-VR. Complete the boundary
+confirmation and return to EVA-VR to resume input. The client sends an explicit
+WebSocket close reason when Android pauses it; EVA displays that reason and
+stops a running rollout until the operator starts it again.
+
+OpenXR session initialization waits for the Android activity to resume and
+create its window. This lets NativeActivity complete its lifecycle callbacks
+before PICO passthrough initialization. A sleeping headset logs
+`Waiting for resumed Android window...` until it is awakened. A persistent
+loading circle is not the dashboard; inspect `demos` and `EVA-VR` in logcat.
 
 ## Wire Protocol
 
