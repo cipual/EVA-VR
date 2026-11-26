@@ -1529,28 +1529,47 @@ struct OpenXrProgram : IOpenXrProgram {
 
         projectionLayerViews.resize(viewCountOutput);
 
-        std::vector<XrPosef> handPose;
         std::array<bool, Side::COUNT> handPoseValid{};
+        std::array<XrPosef, Side::COUNT> inputPoses{eva::IdentityPose(), eva::IdentityPose()};
         for (auto hand : {Side::LEFT, Side::RIGHT}) {
-            XrSpaceLocation spaceLocation{XR_TYPE_SPACE_LOCATION};
-            // WebXR sends XRInputSource.gripSpace for teleoperation. Use the
-            // matching OpenXR grip action space here; aimSpace is the pointing
-            // ray and carries a controller-specific rotation offset.
-            res = xrLocateSpace(m_input.handSpace[hand], m_appSpace, predictedDisplayTime, &spaceLocation);
+            // Rendering remains in the current app space.
+            XrSpaceLocation renderPose{XR_TYPE_SPACE_LOCATION};
+            res = xrLocateSpace(m_input.handSpace[hand], m_appSpace, predictedDisplayTime, &renderPose);
             CHECK_XRRESULT(res, "xrLocateSpace");
-            if (XR_UNQUALIFIED_SUCCESS(res)) {
-                if ((spaceLocation.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0 &&
-                    (spaceLocation.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0) {
-                    handPose.push_back(spaceLocation.pose);
-                    m_application->setControllerPose(int(hand), spaceLocation.pose);
-                    handPoseValid[hand] = IsSessionFocused() && eva::TrackedPose(spaceLocation);
-                }
+            if (XR_SUCCEEDED(res) && eva::ValidRigidPose(renderPose.pose) &&
+                (renderPose.locationFlags & (XR_SPACE_LOCATION_POSITION_VALID_BIT |
+                                            XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) ==
+                    (XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {
+                m_application->setControllerPose(int(hand), renderPose.pose);
+            }
+
+            XrActionStateGetInfo poseInfo{XR_TYPE_ACTION_STATE_GET_INFO};
+            poseInfo.action = m_input.gripPoseAction;
+            poseInfo.subactionPath = m_input.handSubactionPath[hand];
+            XrActionStatePose poseState{XR_TYPE_ACTION_STATE_POSE};
+            CHECK_XRCMD(xrGetActionStatePose(m_session, &poseInfo, &poseState));
+
+            XrSpaceLocation inputPose = renderPose;
+            XrPosef stableFromInput = m_stableInputFromApp;
+            if (m_inputStageSpace != XR_NULL_HANDLE) {
+                // Do not combine a LOCAL grip pose with a separately sampled
+                // LOCAL/STAGE relation: PICO can return inconsistent poses.
+                inputPose = {XR_TYPE_SPACE_LOCATION};
+                res = xrLocateSpace(m_input.handSpace[hand], m_inputStageSpace,
+                                    predictedDisplayTime, &inputPose);
+                CHECK_XRRESULT(res, "xrLocateSpace(STAGE grip)");
+                stableFromInput = m_stageBridge.stableFromStage(m_stageReference);
+            }
+            handPoseValid[hand] = IsSessionFocused() && m_inputOriginValid &&
+                poseState.isActive == XR_TRUE && XR_SUCCEEDED(res) && eva::TrackedPose(inputPose);
+            if (handPoseValid[hand]) {
+                inputPoses[hand] = eva::ComposePose(stableFromInput, inputPose.pose);
             }
         }
 
         // Publish only after BOTH poses were sampled at this reference's XrTime.
         if (IsSessionFocused()) {
-            m_application->publishInputFrame(handPoseValid);
+            m_application->publishInputFrame(handPoseValid, inputPoses);
         } else {
             // System dialogs must not synthesize button releases in collection
             // mode. Close the input session, then require neutral on refocus.

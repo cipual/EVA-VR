@@ -114,6 +114,11 @@ public:
 
     bool anchored() const { return anchored_; }
     const XrPosef& stableFromApp() const { return stableFromApp_; }
+    // Locate grip poses DIRECTLY in STAGE. PICO's separately queried LOCAL
+    // grip pose can disagree with appFromStage after a recenter.
+    XrPosef stableFromStage(const InputReferenceSpace& stageReference) const {
+        return ComposePose(initialAppFromStableStage_, stageReference.stableFromApp());
+    }
 
 private:
     bool anchored_ = false;

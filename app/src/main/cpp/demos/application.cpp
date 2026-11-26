@@ -31,7 +31,8 @@ public:
     virtual void setControllerPose(int leftright, const XrPosef& pose) override;
     void setInputReference(const XrPosef& stableFromApp, XrReferenceSpaceType type,
                            bool valid, bool changed) override;
-    void publishInputFrame(const std::array<bool, 2>& poseValid) override;
+    void publishInputFrame(const std::array<bool, 2>& poseValid,
+                           const std::array<XrPosef, 2>& stablePoses) override;
     virtual void setControllerPower(int leftright, int power) override;
     virtual void setGazeLocation(XrSpaceLocation& gazeLocation, std::vector<XrView>& views, float ipd, XrResult result = XR_SUCCESS) override;
     virtual void setHandJointLocation(XrHandJointLocationEXT* location) override;
@@ -65,6 +66,7 @@ private:
     std::shared_ptr<Player> mPlayer;
     glm::mat4 mControllerModel;
     XrPosef mControllerPose[HAND_COUNT];
+    std::array<XrPosef, 2> mInputControllerPose{eva::IdentityPose(), eva::IdentityPose()};
     XrPosef mHeadPose{};
     ApplicationEvent mControllerState[HAND_COUNT]{};
     XrPosef mInputStableFromApp = eva::IdentityPose();
@@ -251,8 +253,10 @@ void Application::setInputReference(const XrPosef& stableFromApp, XrReferenceSpa
     mInputReferenceInitialized = true;
 }
 
-void Application::publishInputFrame(const std::array<bool, 2>& poseValid) {
+void Application::publishInputFrame(const std::array<bool, 2>& poseValid,
+                                    const std::array<XrPosef, 2>& stablePoses) {
     mInputPoseTracked = poseValid;
+    mInputControllerPose = stablePoses;
     if (mExitRequested || !mInputReferenceValid) return;
     if (mInputWaitForNeutral) {
         for (int hand = 0; hand < HAND_COUNT; ++hand) {
@@ -297,9 +301,9 @@ void Application::publishInputFrame(const std::array<bool, 2>& poseValid) {
             return std::string(value, n > 0 ? static_cast<size_t>(n) : 0);
         };
         const auto left = poseValid[HAND_LEFT]
-            ? eva::ComposePose(mInputStableFromApp, mControllerPose[HAND_LEFT]) : eva::IdentityPose();
+            ? mInputControllerPose[HAND_LEFT] : eva::IdentityPose();
         const auto right = poseValid[HAND_RIGHT]
-            ? eva::ComposePose(mInputStableFromApp, mControllerPose[HAND_RIGHT]) : eva::IdentityPose();
+            ? mInputControllerPose[HAND_RIGHT] : eva::IdentityPose();
         const std::string reference = mInputReferenceType == XR_REFERENCE_SPACE_TYPE_STAGE ? "bounded-floor" : "local";
         std::string frame = "{\"type\":\"frame\",\"version\":1,\"seq\":" +
             std::to_string(sequence++) + ",\"client_time_ms\":" + std::to_string(now) +
@@ -394,8 +398,8 @@ void Application::showPoseStatus() {
         ImGui::TableSetupColumn("Yaw");
         ImGui::TableHeadersRow();
         showPoseRow("Head", eva::ComposePose(mInputStableFromApp, mHeadPose));
-        showPoseRow("Left", eva::ComposePose(mInputStableFromApp, mControllerPose[HAND_LEFT]));
-        showPoseRow("Right", eva::ComposePose(mInputStableFromApp, mControllerPose[HAND_RIGHT]));
+        showPoseRow("Left", mInputControllerPose[HAND_LEFT]);
+        showPoseRow("Right", mInputControllerPose[HAND_RIGHT]);
         ImGui::EndTable();
     }
     ImGui::Separator();

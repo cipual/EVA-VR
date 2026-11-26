@@ -117,6 +117,22 @@ int main() {
     const auto compensatedRight = eva::ComposePose(bridge.stableFromApp(), newRight);
     position(compensatedLeft, .3f, 1, -.5f); identityRotation(compensatedLeft);
     position(compensatedRight, -.4f, .8f, -.9f); identityRotation(compensatedRight);
+    // PICO regression: STAGE grip is unchanged while the runtime's LOCAL grip
+    // and LOCAL/STAGE query disagree. Export must not use the LOCAL grip pose.
+    const XrPosef stageLeft{{0, 0, 0, 1}, {.1f, 2.5f, -.8f}};
+    const XrPosef stageRight{{0, 0, 0, 1}, {-.6f, 2.3f, -1.2f}};
+    position(eva::ComposePose(bridge.stableFromStage(room), stageLeft), .3f, 1, -.5f);
+    position(eva::ComposePose(bridge.stableFromStage(room), stageRight), -.4f, .8f, -.9f);
+    // Even a different/inconsistent LOCAL/STAGE relation cannot move these grips.
+    stageInApp.pose = {{0, 1, 0, 0}, {3, -1.2f, 4}};
+    assert(bridge.update(stageInApp, room));
+    position(eva::ComposePose(bridge.stableFromStage(room), stageLeft), .3f, 1, -.5f);
+    position(eva::ComposePose(bridge.stableFromStage(room), stageRight), -.4f, .8f, -.9f);
+    identityRotation(eva::ComposePose(bridge.stableFromStage(room), stageLeft));
+    auto stageMoved = stageLeft; stageMoved.position.z -= .1f;
+    position(eva::ComposePose(bridge.stableFromStage(room), stageMoved), .3f, 1, -.6f);
+    stageInApp.pose = {inverseYaw, {-1.3f, -1.5f, -1.8f}};
+    assert(bridge.update(stageInApp, room));
     // A temporary failed query must not silently replace the original anchor.
     stageInApp.locationFlags = 0; assert(!bridge.update(stageInApp, room));
     stageInApp.locationFlags = XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
@@ -133,8 +149,11 @@ int main() {
     stageInApp.pose.position.x += 4;
     assert(roomBridge.update(stageInApp, changingRoom));
     position(roomBridge.stableFromApp(), 0, 0, 0); identityRotation(roomBridge.stableFromApp());
+    // Direct STAGE input also compensates a known room-origin change.
+    auto shiftedStageLeft = stageLeft; shiftedStageLeft.position.x -= 4;
+    position(eva::ComposePose(roomBridge.stableFromStage(changingRoom), shiftedStageLeft), .3f, 1, -.5f);
     changingRoom.queue(change(2, undefined, false, XR_REFERENCE_SPACE_TYPE_STAGE)); changingRoom.advance(2);
     assert(!roomBridge.update(stageInApp, changingRoom));
 
-    std::cout << "PASS: timed event transforms, both hands, offsets, invalid/lost events, tracked poses, PICO unknown-LOCAL/STAGE bridge, missing query and room-origin changes\n";
+    std::cout << "PASS: timed event transforms, both hands, offsets, invalid/lost events, tracked poses, PICO unknown-LOCAL/direct-STAGE grips, inconsistent LOCAL poses, missing query and room-origin changes\n";
 }

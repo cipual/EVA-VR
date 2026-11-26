@@ -125,7 +125,7 @@ update. The payload is compatible with the current EVA WebXR node:
   "version": 1,
   "seq": 42,
   "client_time_ms": 1234567890,
-  "reference_space": "local-floor",
+  "reference_space": "local",
   "controllers": {
     "left": {
       "valid": true,
@@ -183,26 +183,27 @@ The app exports poses in its **initial session reference**, rather than changing
 the robot's axis mapping whenever PICO recenters. A head turn does not change
 the robot coordinate transform.
 
-The app creates an independent OpenXR **STAGE** space and locates it relative
-to the current app space at each pose sample's exact `XrTime`. It stores the
-initial app-to-room relation once, then computes:
+The app creates an independent OpenXR **STAGE** space and reads both grip
+poses **directly in STAGE** at the frame's predicted `XrTime`. It stores the
+initial app-to-room relation once, then exports:
 
 ```text
-initialAppFromCurrentApp = initialAppFromStableStage
-                        * stableStageFromCurrentStage
-                        * inverse(currentAppFromCurrentStage)
+initialAppFromGrip = initialAppFromStableStage
+                   * stableStageFromCurrentStage
+                   * currentStageFromGrip
 ```
 
 This handles the PICO4Ultra's observed LOCAL recenter events with
-`poseValid=false`: the transform comes from `xrLocateSpace`, not a guessed angle
-or a new user calibration. Known STAGE-origin changes are accumulated at their
+`poseValid=false`. PICO's LOCAL grip pose and separately queried LOCAL/STAGE
+relation were observed to disagree after recentering, even with tracking flags
+set; the exported controller path does not combine those queries. LOCAL poses
+remain for rendering. Known STAGE-origin changes are accumulated at their
 `changeTime`. If STAGE is unsupported, the app instead uses valid
 `XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING` poses, accounting for the
-application's reference-space offset. The same compensation applies to both
-hands' positions and orientations. Rendering keeps the runtime's current space.
-The existing host-side robot-from-initial-XR extrinsic is applied once and is
-not recalibrated for a known recenter. Frames identify the actual space type
-(`local` for LOCAL; `bounded-floor` for STAGE).
+application's reference-space offset. Both hands use the same position and
+orientation transform. The existing host-side robot-from-initial-XR extrinsic
+is applied once. Frames identify the initial space type (`local` for LOCAL;
+`bounded-floor` for STAGE). Inactive grip actions and untracked poses are invalid.
 
 After a reference change the input socket/session is replaced and both controls
 must return to neutral before the first fresh frame. This discards old grip
