@@ -8,6 +8,7 @@ JavaVM* g_vm = nullptr;
 jobject g_activity = nullptr;
 jmethodID g_poll_haptic = nullptr;
 jmethodID g_send_frame = nullptr;
+jmethodID g_set_input_status = nullptr;
 jmethodID g_is_connected = nullptr;
 std::mutex g_mutex;
 }
@@ -25,6 +26,7 @@ void eva_bridge_set_activity(JNIEnv* env, jobject activity) {
     jclass cls = env->GetObjectClass(activity);
     g_poll_haptic = env->GetMethodID(cls, "pollHaptic", "()[D");
     g_send_frame = env->GetMethodID(cls, "sendFrame", "(Ljava/lang/String;)V");
+    g_set_input_status = env->GetMethodID(cls, "setInputStatus", "(Ljava/lang/String;)V");
     g_is_connected = env->GetMethodID(cls, "isConnected", "()Z");
     env->DeleteLocalRef(cls);
 }
@@ -69,6 +71,22 @@ void eva_bridge_send_frame(const std::string& json) {
     if (attached) g_vm->DetachCurrentThread();
 }
 
+
+void eva_bridge_set_input_status(const std::string& reason) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_vm == nullptr || g_activity == nullptr || g_set_input_status == nullptr) return;
+    JNIEnv* env = nullptr;
+    bool attached = false;
+    if (g_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
+        if (g_vm->AttachCurrentThread(&env, nullptr) != JNI_OK) return;
+        attached = true;
+    }
+    jstring message = env->NewStringUTF(reason.c_str());
+    env->CallVoidMethod(g_activity, g_set_input_status, message);
+    env->DeleteLocalRef(message);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    if (attached) g_vm->DetachCurrentThread();
+}
 
 bool eva_bridge_is_connected() {
     std::lock_guard<std::mutex> lock(g_mutex);

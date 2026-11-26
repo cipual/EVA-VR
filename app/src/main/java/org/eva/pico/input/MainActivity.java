@@ -27,6 +27,7 @@ public class MainActivity extends NativeActivity {
         .pingInterval(5, TimeUnit.SECONDS).build();
     private volatile WebSocket socket;
     private volatile boolean connected, resumed, focused = true;
+    private volatile String inputStatus = "";
     private volatile String endpoint = DEFAULT_ENDPOINT;
     private final Runnable reconnect = this::connect;
 
@@ -82,7 +83,7 @@ public class MainActivity extends NativeActivity {
         }
     }
     private synchronized void connect() {
-        if (!resumed || socket != null || endpoint == null) return;
+        if (!resumed || !inputStatus.isEmpty() || socket != null || endpoint == null) return;
         try {
             Request request = new Request.Builder().url(endpoint).build();
             socket = client.newWebSocket(request, new WebSocketListener() {
@@ -127,7 +128,7 @@ public class MainActivity extends NativeActivity {
         if (socket != ws) return;
         socket = null; connected = false; haptics.clear();
         handler.removeCallbacks(reconnect);
-        if (resumed) handler.postDelayed(reconnect, 1500);
+        if (resumed && inputStatus.isEmpty()) handler.postDelayed(reconnect, 1500);
     }
     private void enqueue(int hand, double intensity, double duration) {
         if (!Double.isFinite(intensity) || !Double.isFinite(duration)) return;
@@ -149,8 +150,19 @@ public class MainActivity extends NativeActivity {
         if (!value) haptics.clear();
     }
     public boolean isConnected() { return connected; }
+    // OpenXR owns this gate. Unknown origins stay blocked until an explicit app restart.
+    public synchronized void setInputStatus(String reason) {
+        if (inputStatus.equals(reason)) return;
+        inputStatus = reason;
+        if (reason.isEmpty()) {
+            connect();
+        } else {
+            Log.w(TAG, reason);
+            disconnect(reason);
+        }
+    }
     public void sendFrame(String frame) {
         WebSocket ws = socket;
-        if (resumed && connected && ws != null && ws.queueSize() < 65536) ws.send(frame);
+        if (resumed && inputStatus.isEmpty() && connected && ws != null && ws.queueSize() < 65536) ws.send(frame);
     }
 }

@@ -16,6 +16,7 @@
 #include <math.h>
 #include "demos/application.h"
 #include "eva_bridge.h"
+#include "input_reference_space.h"
 
 namespace {
 
@@ -816,6 +817,8 @@ struct OpenXrProgram : IOpenXrProgram {
         {
             XrReferenceSpaceCreateInfo referenceSpaceCreateInfo = GetXrReferenceSpaceCreateInfo(m_options.AppSpace);
             CHECK_XRCMD(xrCreateReferenceSpace(m_session, &referenceSpaceCreateInfo, &m_appSpace));
+            m_inputReference = eva::InputReferenceSpace(referenceSpaceCreateInfo.referenceSpaceType,
+                                                       referenceSpaceCreateInfo.poseInReferenceSpace);
         }
 
         //XR_FB_passthrough
@@ -1005,7 +1008,19 @@ struct OpenXrProgram : IOpenXrProgram {
                     LogActionSourceName(m_input.gripPoseAction, "Pose");
                     LogActionSourceName(m_input.hapticAction, "haptic");
                     break;
-                case XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING:
+                case XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING: {
+                    const auto& change = *reinterpret_cast<const XrEventDataReferenceSpaceChangePending*>(event);
+                    if (change.session == m_session) {
+                        m_inputReference.queue(change);
+                        Log::Write(Log::Level::Info, Fmt("EVA-VR reference change type=%d time=%lld poseValid=%d",
+                            change.referenceSpaceType, change.changeTime, change.poseValid));
+                    }
+                    break;
+                }
+                case XR_TYPE_EVENT_DATA_EVENTS_LOST:
+                    m_inputReference.invalidate();
+                    Log::Write(Log::Level::Error, "EVA-VR events lost; input reference is unknown");
+                    break;
                 default: {
                     Log::Write(Log::Level::Verbose, Fmt("Ignoring event type %d", event->type));
                     break;
@@ -1413,6 +1428,16 @@ struct OpenXrProgram : IOpenXrProgram {
         XrFrameWaitInfo frameWaitInfo{XR_TYPE_FRAME_WAIT_INFO};
         XrFrameState frameState{XR_TYPE_FRAME_STATE};
         CHECK_XRCMD(xrWaitFrame(m_session, &frameWaitInfo, &frameState));
+        const bool referenceChanged = m_inputReference.advance(frameState.predictedDisplayTime);
+        if (referenceChanged) {
+            const auto& p = m_inputReference.stableFromApp();
+            Log::Write(Log::Level::Info, Fmt("EVA-VR reference applied time=%lld valid=%d position=(%.4f,%.4f,%.4f) orientation=(%.5f,%.5f,%.5f,%.5f)",
+                frameState.predictedDisplayTime, m_inputReference.valid(),
+                p.position.x, p.position.y, p.position.z,
+                p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w));
+        }
+        m_application->setInputReference(m_inputReference.stableFromApp(), m_inputReference.type(),
+                                         m_inputReference.valid(), referenceChanged);
 
         XrFrameBeginInfo frameBeginInfo{XR_TYPE_FRAME_BEGIN_INFO};
         CHECK_XRCMD(xrBeginFrame(m_session, &frameBeginInfo));
@@ -1469,6 +1494,7 @@ struct OpenXrProgram : IOpenXrProgram {
         projectionLayerViews.resize(viewCountOutput);
 
         std::vector<XrPosef> handPose;
+        std::array<bool, Side::COUNT> handPoseValid{};
         for (auto hand : {Side::LEFT, Side::RIGHT}) {
             XrSpaceLocation spaceLocation{XR_TYPE_SPACE_LOCATION};
             // WebXR sends XRInputSource.gripSpace for teleoperation. Use the
@@ -1481,8 +1507,19 @@ struct OpenXrProgram : IOpenXrProgram {
                     (spaceLocation.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0) {
                     handPose.push_back(spaceLocation.pose);
                     m_application->setControllerPose(int(hand), spaceLocation.pose);
+                    handPoseValid[hand] = IsSessionFocused() && eva::TrackedPose(spaceLocation);
                 }
             }
+        }
+
+        // Publish only after BOTH poses were sampled at this reference's XrTime.
+        if (IsSessionFocused()) {
+            m_application->publishInputFrame(handPoseValid);
+        } else {
+            // System dialogs must not synthesize button releases in collection
+            // mode. Close the input session, then require neutral on refocus.
+            m_application->setInputReference(m_inputReference.stableFromApp(),
+                m_inputReference.type(), m_inputReference.valid(), true);
         }
 
         //eye tracking
@@ -1610,6 +1647,7 @@ struct OpenXrProgram : IOpenXrProgram {
     XrInstance m_instance{XR_NULL_HANDLE};
     XrSession m_session{XR_NULL_HANDLE};
     XrSpace m_appSpace{XR_NULL_HANDLE};
+    eva::InputReferenceSpace m_inputReference;
     XrSystemId m_systemId{XR_NULL_SYSTEM_ID};
 
     std::vector<XrViewConfigurationView> m_configViews;

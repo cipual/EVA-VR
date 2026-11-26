@@ -1,6 +1,7 @@
 /* Copyright (2021-2023) Bytedance Ltd. and/or its affiliates, All rights reserved. */
 #pragma once
 #include <memory>
+#include <array>
 #include "glm/glm.hpp"
 #include <openxr/openxr.h>
 
@@ -79,6 +80,9 @@ public:
     virtual bool initialize(const XrInstance instance, const XrSession session, Extentions* extention) = 0;
     virtual void setHapticCallback(void* arg, hapticCallback hapticCb) = 0;
     virtual void setControllerPose(int leftright, const XrPosef& pose) = 0;
+    virtual void setInputReference(const XrPosef& stableFromApp, XrReferenceSpaceType type,
+                                   bool valid, bool changed) = 0;
+    virtual void publishInputFrame(const std::array<bool, 2>& poseValid) = 0;
     virtual void setControllerPower(int leftright, int power) = 0;
     virtual void setGazeLocation(XrSpaceLocation& gazeLocation, std::vector<XrView>& views, float ipd, XrResult result = XR_SUCCESS) = 0;
     virtual void setHandJointLocation(XrHandJointLocationEXT* location) = 0;

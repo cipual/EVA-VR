@@ -16,6 +16,7 @@
 #include "graphicsplugin.h"
 #include "cube.h"
 #include "eva_bridge.h"
+#include "input_reference_space.h"
 #include <chrono>
 #include <cstdio>
 #include <cmath>
@@ -28,6 +29,9 @@ public:
     virtual bool initialize(const XrInstance instance, const XrSession session, Extentions* extentions) override;
     virtual void setHapticCallback(void* arg, hapticCallback hapticCb) override;
     virtual void setControllerPose(int leftright, const XrPosef& pose) override;
+    void setInputReference(const XrPosef& stableFromApp, XrReferenceSpaceType type,
+                           bool valid, bool changed) override;
+    void publishInputFrame(const std::array<bool, 2>& poseValid) override;
     virtual void setControllerPower(int leftright, int power) override;
     virtual void setGazeLocation(XrSpaceLocation& gazeLocation, std::vector<XrView>& views, float ipd, XrResult result = XR_SUCCESS) override;
     virtual void setHandJointLocation(XrHandJointLocationEXT* location) override;
@@ -36,6 +40,7 @@ public:
     virtual void renderFrame(const XrPosef& pose, const glm::mat4& project, const glm::mat4& view, int32_t eye) override;
 private:
     void layout();
+    void setInputStatus(const std::string& reason);
     void showDashboard(const glm::mat4& project, const glm::mat4& view);
     void showDashboardController();
     void showPoseStatus();
@@ -62,6 +67,12 @@ private:
     XrPosef mControllerPose[HAND_COUNT];
     XrPosef mHeadPose{};
     ApplicationEvent mControllerState[HAND_COUNT]{};
+    XrPosef mInputStableFromApp = eva::IdentityPose();
+    XrReferenceSpaceType mInputReferenceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
+    bool mInputReferenceValid = true;
+    bool mInputReferenceInitialized = false;
+    bool mInputWaitForNeutral = true;
+    std::string mInputStatus;
     std::shared_ptr<CubeRender> mCubeRender;
 
     //openxr
@@ -214,17 +225,51 @@ void Application::inputEvent(int leftright, const ApplicationEvent& event) {
         mPanel->triggerEvent(event.click_trigger);
     }
 
-    // The right-hand callback is the second callback for each action sync.
-    // Send one complete frame after both controller states are available.
-    if (leftright == HAND_RIGHT && mControllerEvent[HAND_LEFT] != nullptr) {
+}
+
+void Application::setInputStatus(const std::string& reason) {
+    if (mInputStatus == reason) return;
+    mInputStatus = reason;
+    eva_bridge_set_input_status(reason);
+}
+
+void Application::setInputReference(const XrPosef& stableFromApp, XrReferenceSpaceType type,
+                                     bool valid, bool changed) {
+    mInputStableFromApp = stableFromApp;
+    mInputReferenceType = type;
+    mInputReferenceValid = valid;
+    if (!valid) {
+        setInputStatus("EVA-VR reference transform unknown; input blocked");
+    } else if (changed || !mInputReferenceInitialized) {
+        mInputWaitForNeutral = true;
+        // A new socket/session discards old grip origins and queued semantic events.
+        setInputStatus("EVA-VR reference changed; release all controls");
+    }
+    mInputReferenceInitialized = true;
+}
+
+void Application::publishInputFrame(const std::array<bool, 2>& poseValid) {
+    if (mExitRequested || !mInputReferenceValid) return;
+    if (mInputWaitForNeutral) {
+        for (int hand = 0; hand < HAND_COUNT; ++hand) {
+            const auto& e = mControllerState[hand];
+            if (!poseValid[hand] || e.trigger > 0.1f || e.squeeze > 0.1f ||
+                e.click_trigger || e.click_squeeze || e.click_thumbstck || e.click_menu ||
+                e.click_a || e.click_b || e.click_x || e.click_y ||
+                std::abs(e.thumbstick_x) > 0.1f || std::abs(e.thumbstick_y) > 0.1f) return;
+        }
+        setInputStatus("");
+        // Ensure the first frame on the replacement connection is neutral.
+        if (!eva_bridge_is_connected()) return;
+        mInputWaitForNeutral = false;
+    }
+    {
         const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
         static uint64_t sequence = 0;
-        auto controller = [](const XrPosef& pose, const ApplicationEvent& state, int hand) {
+        auto controller = [](const XrPosef& pose, const ApplicationEvent& state, int hand, bool valid) {
             const bool primary = hand == HAND_LEFT ? state.click_x : state.click_a;
             const bool secondary = hand == HAND_LEFT ? state.click_y : state.click_b;
-            const bool valid = std::abs(pose.orientation.x) + std::abs(pose.orientation.y) +
-                std::abs(pose.orientation.z) + std::abs(pose.orientation.w) > 1e-5f;
             char value[1800];
             const int n = std::snprintf(value, sizeof(value),
                 "{\"valid\":%s,\"position\":[%.7g,%.7g,%.7g],\"orientation_xyzw\":[%.7g,%.7g,%.7g,%.7g],\"profiles\":[\"pico-4-ultra\"],\"mapping\":\"pico-4-ultra\",\"buttons\":["
@@ -235,8 +280,8 @@ void Application::inputEvent(int leftright, const ApplicationEvent& event) {
                 "{\"pressed\":%s,\"touched\":%s,\"value\":%s},"
                 "{\"pressed\":%s,\"touched\":%s,\"value\":%s}],\"axes\":[%.7g,%.7g]}",
                 valid ? "true" : "false",
-                // Keep the native payload identical to WebXR. EVA's
-                // base_from_xr_rotation performs the robot-frame conversion.
+                // Already restored to the initial session space. EVA applies
+                // its existing robot-from-initial-XR extrinsic exactly once.
                 pose.position.x, pose.position.y, pose.position.z,
                 pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w,
                 state.trigger >= 0.5f ? "true" : "false", state.touch_trigger ? "true" : "false", state.trigger,
@@ -247,11 +292,18 @@ void Application::inputEvent(int leftright, const ApplicationEvent& event) {
                 state.thumbstick_x, state.thumbstick_y);
             return std::string(value, n > 0 ? static_cast<size_t>(n) : 0);
         };
+        const auto left = poseValid[HAND_LEFT]
+            ? eva::ComposePose(mInputStableFromApp, mControllerPose[HAND_LEFT]) : eva::IdentityPose();
+        const auto right = poseValid[HAND_RIGHT]
+            ? eva::ComposePose(mInputStableFromApp, mControllerPose[HAND_RIGHT]) : eva::IdentityPose();
+        const std::string reference = mInputReferenceType == XR_REFERENCE_SPACE_TYPE_STAGE ? "bounded-floor" : "local";
         std::string frame = "{\"type\":\"frame\",\"version\":1,\"seq\":" +
             std::to_string(sequence++) + ",\"client_time_ms\":" + std::to_string(now) +
-            ",\"reference_space\":\"local-floor\",\"controllers\":{\"left\":" +
-            controller(mControllerPose[HAND_LEFT], *mControllerEvent[HAND_LEFT], HAND_LEFT) +
-            ",\"right\":" + controller(mControllerPose[HAND_RIGHT], *mControllerEvent[HAND_RIGHT], HAND_RIGHT) + "}}";
+            ",\"reference_space\":\"" + reference + "\",\"controllers\":{\"left\":" +
+            controller(left, poseValid[HAND_LEFT] ? mControllerState[HAND_LEFT] : ApplicationEvent{},
+                       HAND_LEFT, poseValid[HAND_LEFT]) +
+            ",\"right\":" + controller(right, poseValid[HAND_RIGHT] ? mControllerState[HAND_RIGHT] : ApplicationEvent{},
+                                        HAND_RIGHT, poseValid[HAND_RIGHT]) + "}}";
         eva_bridge_send_frame(frame);
     }
 
@@ -317,6 +369,14 @@ void Application::showPoseStatus() {
                        "HOST: %s", connected ? "CONNECTED" : "DISCONNECTED");
     ImGui::SameLine();
     ImGui::Text("  EVA-VR");
+    if (!mInputReferenceValid) {
+        ImGui::TextColored(ImVec4(1, 0.3f, 0.2f, 1), "REFERENCE UNKNOWN - INPUT BLOCKED");
+        ImGui::TextWrapped("Runtime supplied no old/new transform. Establish the robot frame before restarting input.");
+    } else if (mInputWaitForNeutral) {
+        ImGui::TextColored(ImVec4(1, 0.8f, 0.2f, 1), "REFERENCE STABLE - RELEASE ALL CONTROLS");
+    } else {
+        ImGui::Text("REFERENCE STABLE (initial session, automatic compensation)");
+    }
 
     if (ImGui::BeginTable("pose status", 7, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit)) {
         ImGui::TableSetupColumn("source");
@@ -327,9 +387,9 @@ void Application::showPoseStatus() {
         ImGui::TableSetupColumn("Pitch");
         ImGui::TableSetupColumn("Yaw");
         ImGui::TableHeadersRow();
-        showPoseRow("Head", mHeadPose);
-        showPoseRow("Left", mControllerPose[HAND_LEFT]);
-        showPoseRow("Right", mControllerPose[HAND_RIGHT]);
+        showPoseRow("Head", eva::ComposePose(mInputStableFromApp, mHeadPose));
+        showPoseRow("Left", eva::ComposePose(mInputStableFromApp, mControllerPose[HAND_LEFT]));
+        showPoseRow("Right", eva::ComposePose(mInputStableFromApp, mControllerPose[HAND_RIGHT]));
         ImGui::EndTable();
     }
     ImGui::Separator();
